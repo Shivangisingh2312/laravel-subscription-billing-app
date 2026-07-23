@@ -19,7 +19,11 @@ class RecordInvoiceFromStripeAction
     public function handle(User $user, array $stripeInvoice, string $status = 'paid'): Invoice
     {
         $stripeInvoiceId = $stripeInvoice['id'];
-        $amount = (int) ($stripeInvoice['amount_paid'] ?? $stripeInvoice['amount_due'] ?? 0);
+
+        // Convert Cents to Dollars
+        $amountInCents = (int) ($stripeInvoice['amount_paid'] ?? $stripeInvoice['amount_due'] ?? 0);
+        $amountInDollars = $this->convertCentsToDollars($amountInCents);
+
         $currency = strtolower((string) ($stripeInvoice['currency'] ?? 'usd'));
         $number = $stripeInvoice['number'] ?? ('INV-'.Str::upper(Str::random(8)));
 
@@ -29,12 +33,13 @@ class RecordInvoiceFromStripeAction
         $plan = is_string($priceId) ? Plan::findByStripePriceId($priceId) : null;
         $interval = $plan && is_string($priceId) ? $plan->intervalForStripePriceId($priceId) : null;
 
+        // Invoice Create/Update
         $invoice = Invoice::query()->updateOrCreate(
             ['stripe_invoice_id' => $stripeInvoiceId],
             [
                 'user_id' => $user->id,
                 'number' => $number,
-                'amount' => $amount,
+                'amount' => $amountInDollars, // store in dollars (e.g., 9.99 instead of 999 cents)
                 'currency' => $currency,
                 'status' => $status,
                 'plan_name' => $plan?->name,
@@ -52,6 +57,7 @@ class RecordInvoiceFromStripeAction
             ]
         );
 
+        //  Payment Create/Update
         $payment = Payment::query()->updateOrCreate(
             [
                 'stripe_invoice_id' => $stripeInvoiceId,
@@ -60,7 +66,7 @@ class RecordInvoiceFromStripeAction
             [
                 'invoice_id' => $invoice->id,
                 'stripe_payment_intent_id' => $stripeInvoice['payment_intent'] ?? null,
-                'amount' => $amount,
+                'amount' => $amountInDollars, // store in dollars (e.g., 9.99 instead of 999 cents)
                 'currency' => $currency,
                 'status' => $status === 'paid' ? 'succeeded' : $status,
                 'description' => $plan
@@ -69,6 +75,7 @@ class RecordInvoiceFromStripeAction
                 'paid_at' => $status === 'paid' ? now() : null,
                 'metadata' => [
                     'stripe_status' => $stripeInvoice['status'] ?? null,
+                    'amount_in_cents' => $amountInCents, // Save in cents for reference or debugging
                 ],
             ]
         );
@@ -79,5 +86,19 @@ class RecordInvoiceFromStripeAction
         }
 
         return $invoice;
+    }
+
+    /**
+     *  NEW HELPER METHOD: Convert Cents to Dollars
+     *
+     * Stripe always sends amount in cents (e.g., 999 for $9.99)
+     * This method converts it to dollars (e.g., 9.99)
+     *
+     * @param  int  $amountInCents
+     * @return float
+     */
+    protected function convertCentsToDollars(int $amountInCents): float
+    {
+        return round($amountInCents / 100, 2);
     }
 }
